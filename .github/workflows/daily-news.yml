@@ -24,7 +24,7 @@ jobs:
 
       - name: 🚀 运行资讯推送脚本
         env:
-          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_USER_ID:   ${{ secrets.SLACK_USER_ID }}
         run: python scripts/fetch_and_send.py
