@@ -1,7 +1,7 @@
 """
 Tech News Bot — OpenAI 版
 每天自动搜集全球科技资讯（重点亚洲），发送到 Slack 私信
-使用 OpenAI API（gpt-4o-mini + 网络搜索，每次约 $0.01）
+使用 gpt-4o-mini-search-preview（专为实时网络搜索训练的模型）
 """
 
 import os
@@ -14,7 +14,7 @@ OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_USER_ID   = os.environ["SLACK_USER_ID"]
 
-OPENAI_URL    = "https://api.openai.com/v1/responses"
+OPENAI_URL    = "https://api.openai.com/v1/chat/completions"
 SLACK_DM_OPEN = "https://slack.com/api/conversations.open"
 SLACK_POST    = "https://slack.com/api/chat.postMessage"
 
@@ -28,7 +28,7 @@ def build_prompt() -> str:
 
     return f"""你是一个专业的科技资讯编辑。今天是 {today}（东京时间）。
 
-请利用网络搜索搜集今日全球科技资讯，重点覆盖亚洲（中国、日本、韩国、东南亚），生成一份完整简报。
+请搜索今日全球科技资讯，重点覆盖亚洲（中国、日本、韩国、东南亚），生成一份完整简报。
 
 ## 搜集来源（需覆盖以下类型）
 - 中文科技媒体：36Kr、IT之家、虎嗅、少数派、澎湃科技
@@ -65,19 +65,22 @@ def build_prompt() -> str:
 请直接输出简报内容，不要有任何前言或解释。"""
 
 
-# ── 调用 OpenAI API（启用网络搜索）─────────────────────────
+# ── 调用 OpenAI Search API ───────────────────────────────────
 def fetch_news_from_openai() -> str:
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    # 使用专为网络搜索训练的模型，自动实时搜索当日新闻
     payload = {
-        "model": "gpt-4o-mini",
-        "tools": [{"type": "web_search_preview"}],
-        "input": build_prompt(),
+        "model": "gpt-4o-mini-search-preview",
+        "web_search_options": {},
+        "messages": [
+            {"role": "user", "content": build_prompt()}
+        ],
     }
 
-    print("📡 正在调用 OpenAI API 搜集资讯...")
+    print("📡 正在调用 OpenAI Search API 搜集资讯...")
     resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=120)
 
     if resp.status_code != 200:
@@ -86,20 +89,13 @@ def fetch_news_from_openai() -> str:
 
     data = resp.json()
 
-    # 提取所有 output_text 内容
-    text_parts = []
-    for item in data.get("output", []):
-        if item.get("type") == "message":
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    text_parts.append(content.get("text", ""))
-
-    result = "\n".join(text_parts).strip()
-    if not result:
-        raise RuntimeError(f"OpenAI 返回内容为空，原始响应：{json.dumps(data, ensure_ascii=False)[:500]}")
+    try:
+        result = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"解析 OpenAI 响应失败: {e}\n原始响应: {json.dumps(data, ensure_ascii=False)[:500]}")
 
     print(f"✅ OpenAI 返回内容长度：{len(result)} 字符")
-    return result
+    return result.strip()
 
 
 # ── 发送到 Slack DM ─────────────────────────────────────────
@@ -157,7 +153,7 @@ def send_to_slack(text: str) -> None:
             payload["blocks"].append({
                 "type": "context",
                 "elements": [{"type": "mrkdwn",
-                               "text": f"_由 Tech News Bot (OpenAI) 自动生成 · {timestamp} JST_"}],
+                               "text": f"_由 Tech News Bot (OpenAI Search) 自动生成 · {timestamp} JST_"}],
             })
 
         resp = requests.post(SLACK_POST, headers=headers, json=payload)
@@ -171,7 +167,7 @@ def send_to_slack(text: str) -> None:
 # ── 主入口 ──────────────────────────────────────────────────
 def main():
     print("=" * 50)
-    print("🚀 Tech News Bot (OpenAI 版) 启动")
+    print("🚀 Tech News Bot (OpenAI Search 版) 启动")
     jst = timezone(timedelta(hours=9))
     print(f"⏰ 当前东京时间：{datetime.now(jst).strftime('%Y-%m-%d %H:%M')}")
     print("=" * 50)
