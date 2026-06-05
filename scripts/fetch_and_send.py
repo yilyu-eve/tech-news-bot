@@ -1,7 +1,7 @@
 """
-Tech News Bot — Gemini 免费版
+Tech News Bot — OpenAI 版
 每天自动搜集全球科技资讯（重点亚洲），发送到 Slack 私信
-使用 Google Gemini API（免费额度：每天1500次，完全够用）
+使用 OpenAI API（gpt-4o-mini + 网络搜索，每次约 $0.01）
 """
 
 import os
@@ -10,17 +10,11 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 # ── 常量配置 ────────────────────────────────────────────────
-GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
+OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_USER_ID   = os.environ["SLACK_USER_ID"]
 
-# Gemini 2.0 Flash — 免费且支持 Google Search grounding
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent"
-    f"?key={GEMINI_API_KEY}"
-)
-
+OPENAI_URL    = "https://api.openai.com/v1/responses"
 SLACK_DM_OPEN = "https://slack.com/api/conversations.open"
 SLACK_POST    = "https://slack.com/api/chat.postMessage"
 
@@ -34,7 +28,7 @@ def build_prompt() -> str:
 
     return f"""你是一个专业的科技资讯编辑。今天是 {today}（东京时间）。
 
-请利用 Google Search 搜集今日全球科技资讯，重点覆盖亚洲（中国、日本、韩国、东南亚），生成一份完整简报。
+请利用网络搜索搜集今日全球科技资讯，重点覆盖亚洲（中国、日本、韩国、东南亚），生成一份完整简报。
 
 ## 搜集来源（需覆盖以下类型）
 - 中文科技媒体：36Kr、IT之家、虎嗅、少数派、澎湃科技
@@ -71,39 +65,41 @@ def build_prompt() -> str:
 请直接输出简报内容，不要有任何前言或解释。"""
 
 
-# ── 调用 Gemini API（启用 Google Search grounding）──────────
-def fetch_news_from_gemini() -> str:
-    headers = {"Content-Type": "application/json"}
+# ── 调用 OpenAI API（启用网络搜索）─────────────────────────
+def fetch_news_from_openai() -> str:
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "contents": [
-            {"role": "user", "parts": [{"text": build_prompt()}]}
-        ],
-        # Google Search grounding — 让 Gemini 实时搜索今日新闻
-        "tools": [{"google_search": {}}],
-        "generationConfig": {
-            "temperature": 0.4,
-            "maxOutputTokens": 8192,
-        },
+        "model": "gpt-4o-mini",
+        "tools": [{"type": "web_search_preview"}],
+        "input": build_prompt(),
     }
 
-    print("📡 正在调用 Gemini API 搜集资讯...")
-    resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=120)
+    print("📡 正在调用 OpenAI API 搜集资讯...")
+    resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=120)
 
-    # 错误处理
     if resp.status_code != 200:
-        print(f"❌ Gemini API 错误 {resp.status_code}: {resp.text}")
+        print(f"❌ OpenAI API 错误 {resp.status_code}: {resp.text}")
         resp.raise_for_status()
 
     data = resp.json()
 
-    # 提取文字内容
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"解析 Gemini 响应失败: {e}\n原始响应: {json.dumps(data, ensure_ascii=False)[:500]}")
+    # 提取所有 output_text 内容
+    text_parts = []
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    text_parts.append(content.get("text", ""))
 
-    print(f"✅ Gemini 返回内容长度：{len(text)} 字符")
-    return text.strip()
+    result = "\n".join(text_parts).strip()
+    if not result:
+        raise RuntimeError(f"OpenAI 返回内容为空，原始响应：{json.dumps(data, ensure_ascii=False)[:500]}")
+
+    print(f"✅ OpenAI 返回内容长度：{len(result)} 字符")
+    return result
 
 
 # ── 发送到 Slack DM ─────────────────────────────────────────
@@ -130,7 +126,6 @@ def send_to_slack(text: str) -> None:
     jst = timezone(timedelta(hours=9))
     timestamp = datetime.now(jst).strftime("%Y-%m-%d %H:%M")
 
-    # Slack 单条消息上限约 3000 字符，超过需分段
     chunk_size = 2800
     chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
     total = len(chunks)
@@ -151,16 +146,18 @@ def send_to_slack(text: str) -> None:
                 ],
             }
         else:
-            payload = {"channel": channel_id, "blocks": [
-                {"type": "section", "text": {"type": "mrkdwn", "text": chunk}},
-            ]}
+            payload = {
+                "channel": channel_id,
+                "blocks": [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": chunk}},
+                ],
+            }
 
-        # 最后一段加时间戳
         if idx == total:
             payload["blocks"].append({
                 "type": "context",
                 "elements": [{"type": "mrkdwn",
-                               "text": f"_由 Tech News Bot (Gemini) 自动生成 · {timestamp} JST_"}],
+                               "text": f"_由 Tech News Bot (OpenAI) 自动生成 · {timestamp} JST_"}],
             })
 
         resp = requests.post(SLACK_POST, headers=headers, json=payload)
@@ -174,12 +171,12 @@ def send_to_slack(text: str) -> None:
 # ── 主入口 ──────────────────────────────────────────────────
 def main():
     print("=" * 50)
-    print("🚀 Tech News Bot (Gemini 免费版) 启动")
+    print("🚀 Tech News Bot (OpenAI 版) 启动")
     jst = timezone(timedelta(hours=9))
     print(f"⏰ 当前东京时间：{datetime.now(jst).strftime('%Y-%m-%d %H:%M')}")
     print("=" * 50)
 
-    news_text = fetch_news_from_gemini()
+    news_text = fetch_news_from_openai()
     send_to_slack(news_text)
 
     print("=" * 50)
